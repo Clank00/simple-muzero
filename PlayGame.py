@@ -10,95 +10,97 @@ from Game import ReplayBuffer
 from Network import train_network
 from MCTS import *
 
+
 # MuZero training is split into two independent parts: Network training and
 # self-play data generation.
 # These two parts only communicate by transferring the latest network checkpoint
 # from the training to the self-play, and the finished games from the self-play
 # to the training.
 def muzero(config: MuZeroConfig):
-  storage = GameSharedStorage(config)
-  replay_buffer = ReplayBuffer(config)
+    storage = GameSharedStorage(config)
+    replay_buffer = ReplayBuffer(config)
 
-  for _ in range(config.num_actors):
-    launch_job(run_selfplay, config, storage, replay_buffer)
+    for _ in range(config.num_actors):
+        launch_job(run_selfplay, config, storage, replay_buffer)
 
-  train_network(config, storage, replay_buffer, GameNetwork(config))
+    train_network(config, storage, replay_buffer, GameNetwork(config))
 
-  return storage.latest_network()
+    return storage.latest_network()
+
 
 # Each self-play job is independent of all others; it takes the latest network
 # snapshot, produces a game and makes it available to the training job by
 # writing it to a shared replay buffer.
 def run_selfplay(config: MuZeroConfig, storage: SharedStorage,
                  replay_buffer: ReplayBuffer):
-  wins = 0
-  for _ in range(5):
-    network = storage.latest_network()
-    game = play_game(config, network)
-    wins += game.win
-    replay_buffer.save_game(game)
-  print('GAMES WON ', wins)
+    wins = 0
+    for _ in range(5):
+        network = storage.latest_network()
+        game = play_game(config, network)
+        wins += game.win
+        replay_buffer.save_game(game)
+    print('GAMES WON ', wins)
+
 
 # Each game is produced by starting at the initial board position, then
 # repeatedly executing a Monte Carlo Tree Search to generate moves until the end
 # of the game is reached.
 def play_game(config: MuZeroConfig, network: GameNetwork) -> Game:
-  game = config.new_game()
-  while game.terminal() == 0 and len(game.history) < config.max_moves:
-    # At the root of the search tree we use the representation function to
-    # obtain a hidden state given the current observation.
-    root = Node(0)
-    current_observation = game.make_image(-1)
-    print(game.getCanonicalForm(current_observation))
-    curr_player = game.to_play()
-    print('PLAYER ', curr_player)
-    expand_node(root, curr_player, game.legal_actions(),
-                network.initial_inference(game.getCanonicalForm(current_observation)))
-    add_exploration_noise(config, root)
-    
-    # We then run a Monte Carlo Tree Search using only action sequences and the
-    # model learned by the network.
-    run_mcts(config, root, game.action_history(), network)
-    action = select_action(config, len(game.history), root, network)
-    game.apply(action)
-    game.store_search_statistics(root)
-  print(game.getCanonicalForm(game.make_image(-1)))
-  # test_game = config.new_game()
-  # print('SIMULATION BEGIN...')
-  # for action in game.action_history().history:
-  #   current_observation = test_game.make_image(-1)
-  #   print(test_game.getCanonicalForm(current_observation))
-  #   if not test_game.apply(action):
-  #     print('\n\nILLEGAL MOVE\n\n')
-  #     break
-  #   next_player = test_game.to_play()
-  # print('SIMULATION END...')
-  return game
+    game = config.new_game()
+    while game.terminal() == 0 and len(game.history) < config.max_moves:
+        # At the root of the search tree we use the representation function to
+        # obtain a hidden state given the current observation.
+        root = Node(0)
+        current_observation = game.make_image(-1)
+        print(game.getCanonicalForm(current_observation))
+        curr_player = game.to_play()
+        print('PLAYER ', curr_player)
+        expand_node(root, curr_player, game.legal_actions(),
+                    network.initial_inference(game.getCanonicalForm(current_observation)))
+        add_exploration_noise(config, root)
+
+        # We then run a Monte Carlo Tree Search using only action sequences and the
+        # model learned by the network.
+        run_mcts(config, root, game.action_history(), network)
+        action = select_action(config, len(game.history), root, network)
+        game.apply(action)
+        game.store_search_statistics(root)
+    print(game.getCanonicalForm(game.make_image(-1)))
+    # test_game = config.new_game()
+    # print('SIMULATION BEGIN...')
+    # for action in game.action_history().history:
+    #   current_observation = test_game.make_image(-1)
+    #   print(test_game.getCanonicalForm(current_observation))
+    #   if not test_game.apply(action):
+    #     print('\n\nILLEGAL MOVE\n\n')
+    #     break
+    #   next_player = test_game.to_play()
+    # print('SIMULATION END...')
+    return game
 
 
 def select_action(config: MuZeroConfig, num_moves: int, node: Node,
                   network: GameNetwork):
-  visit_counts = [
-      (child.visit_count, action) for action, child in node.children.items()
-  ]
-  t = config.visit_softmax_temperature_fn(
-      num_moves=num_moves, training_steps=network.training_steps())
-  _, action = softmax_sample(visit_counts, t)
-  return action
-
+    visit_counts = [
+        (child.visit_count, action) for action, child in node.children.items()
+    ]
+    t = config.visit_softmax_temperature_fn(
+        num_moves=num_moves, training_steps=network.training_steps())
+    _, action = softmax_sample(visit_counts, t)
+    return action
 
 
 # At the start of each search, we add dirichlet noise to the prior of the root
 # to encourage the search to explore new actions.
 def add_exploration_noise(config: MuZeroConfig, node: Node):
-  actions = list(node.children.keys())
-  noise = np.random.dirichlet([config.root_dirichlet_alpha] * len(actions))
-  frac = config.root_exploration_fraction
-  for a, n in zip(actions, noise):
-    node.children[a].prior = node.children[a].prior * (1 - frac) + n * frac
+    actions = list(node.children.keys())
+    noise = np.random.dirichlet([config.root_dirichlet_alpha] * len(actions))
+    frac = config.root_exploration_fraction
+    for a, n in zip(actions, noise):
+        node.children[a].prior = node.children[a].prior * (1 - frac) + n * frac
 
-if __name__=="__main__":
-  config = make_tictactoe_config(5)
-  for episode in range(5):
-    muzero(config)
-    
+
+if __name__ == "__main__":
+    config = make_tictactoe_config(5)
+    for episode in range(5):
+        muzero(config)
